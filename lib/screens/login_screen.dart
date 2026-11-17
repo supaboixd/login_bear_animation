@@ -1,10 +1,13 @@
+import 'dart:async';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
+import 'package:login_bear_animation/screens/signup_screen.dart';
 import 'package:rive/rive.dart';
-import 'dart:async'; // 3.1 Importar el timer
 
 class LoginScreen extends StatefulWidget {
-  const LoginScreen({super.key}); // Fixed constructor name
+  const LoginScreen({super.key});
+
+  static final ValueNotifier<bool> isCelebrating = ValueNotifier<bool>(false);
 
   @override
   State<LoginScreen> createState() => _LoginScreenState();
@@ -14,75 +17,257 @@ class _LoginScreenState extends State<LoginScreen> {
   bool _obscure = true;
   bool _rememberMe = false;
   bool _rememberMeAnimating = false;
+  bool _isLoading = false;
 
-  // 1.1 crear el cerebro de la animacion
   StateMachineController? _controller;
-  // SMI: State Machine Input
   SMIBool? _isChecking;
   SMIBool? _isHandsUp;
   SMITrigger? _trigSuccess;
   SMITrigger? _trigFail;
-
-  // 3.2 Variable del recorrido de la mirada
   SMINumber? _numLook;
 
-  // 3.3 Timer para detener la mirada al dejar de escribir
   Timer? _typingDebounce;
 
-  // 2.1 crear las variables para FocusNode
   final _emailFocus = FocusNode();
   final _passwordFocus = FocusNode();
 
-
-  //4.1 Controllers que manipulan lo que el usuario escribe
   final _emailCtrl = TextEditingController();
   final _passCtrl = TextEditingController();
 
-  //4.2 Errores para mostrarlo en la UI
   String? emailError;
   String? passError;
 
-  //4.3 validadores
-  bool isValidEmail(String email){
+  bool isValidEmail(String email) {
     final re = RegExp(r'^[^\s@]+@[^\s@]+\.[^\s@]+$');
     return re.hasMatch(email);
   }
-  bool isValidPassword(String pass) {
-    final re = RegExp(r'^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,}$');
-    return re.hasMatch(pass);
+
+  String _mapFirebaseAuthError(FirebaseAuthException e) {
+    switch (e.code) {
+      case 'invalid-credential':
+      case 'user-not-found':
+      case 'wrong-password':
+        return 'Correo o contraseña incorrectos.';
+      case 'invalid-email':
+        return 'El formato del correo electrónico no es válido.';
+      case 'user-disabled':
+        return 'Esta cuenta ha sido deshabilitada.';
+      case 'operation-not-allowed':
+        return 'Habilita Correo/Contraseña en Firebase Console > Authentication.';
+      case 'too-many-requests':
+        return 'Demasiados intentos fallidos. Intenta más tarde.';
+      case 'network-request-failed':
+        return 'Sin conexión a internet. Verifica tu red.';
+      default:
+        return 'Error (${e.code}): ${e.message ?? 'Ocurrió un problema'}';
+    }
   }
-  //4.4
-  void _onlogin(){
-    //4.5 De lo que escribio el usuario, quitar espacios
+
+  Future<void> _onLogin() async {
+    if (_isLoading) return;
+
     final email = _emailCtrl.text.trim();
     final pass = _passCtrl.text;
 
+    final eError = isValidEmail(email) ? null : 'Correo electrónico inválido';
+    final pError = pass.isNotEmpty ? null : 'Ingresa tu contraseña';
 
-    //4.6 Evaluar los errores
-    final eError = isValidEmail(email) ? null : "invalid email";
-    final pError = isValidPassword(pass) ? null: "invalid password";
-
-    //4.7
-    setState((){
+    setState(() {
       emailError = eError;
       passError = pError;
     });
 
-
-    //4.8 Cerrar el teclado y bajar las manos
-    FocusScope.of(context).unfocus(); //Quita el foco
+    FocusScope.of(context).unfocus();
     _typingDebounce?.cancel();
     _isChecking?.change(false);
     _isHandsUp?.change(false);
     _numLook?.value = 50.0;
 
-
-    //4.9 Activar triggers
-    if (eError == null && pError == null){
-      _trigSuccess?.fire();
-    }
-    else {
+    if (eError != null || pError != null) {
       _trigFail?.fire();
+      return;
+    }
+
+    setState(() => _isLoading = true);
+    LoginScreen.isCelebrating.value = true;
+
+    try {
+      await FirebaseAuth.instance.signInWithEmailAndPassword(
+        email: email,
+        password: pass,
+      );
+
+      _trigSuccess?.fire();
+      await Future.delayed(const Duration(milliseconds: 1500));
+
+      LoginScreen.isCelebrating.value = false;
+    } on FirebaseAuthException catch (e) {
+      LoginScreen.isCelebrating.value = false;
+      _trigFail?.fire();
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(_mapFirebaseAuthError(e)),
+          backgroundColor: Colors.redAccent,
+        ),
+      );
+    } catch (e) {
+      LoginScreen.isCelebrating.value = false;
+      _trigFail?.fire();
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Error inesperado: $e'),
+          backgroundColor: Colors.redAccent,
+        ),
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _isLoading = false);
+      }
+    }
+  }
+
+  Future<void> _onForgotPassword() async {
+    if (_isLoading) return;
+
+    FocusScope.of(context).unfocus();
+    _typingDebounce?.cancel();
+    _isChecking?.change(false);
+    _isHandsUp?.change(false);
+    _numLook?.value = 50.0;
+
+    final resetEmailCtrl = TextEditingController(text: _emailCtrl.text.trim());
+    String? dialogError;
+    bool isSending = false;
+
+    final sentToEmail = await showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            Future<void> sendReset() async {
+              final targetEmail = resetEmailCtrl.text.trim();
+              if (!isValidEmail(targetEmail)) {
+                setDialogState(() {
+                  dialogError = 'Ingresa un correo electrónico válido.';
+                });
+                return;
+              }
+
+              setDialogState(() {
+                dialogError = null;
+                isSending = true;
+              });
+
+              try {
+                await FirebaseAuth.instance.sendPasswordResetEmail(
+                  email: targetEmail,
+                );
+                if (dialogContext.mounted) {
+                  Navigator.of(dialogContext).pop(targetEmail);
+                }
+              } on FirebaseAuthException catch (e) {
+                setDialogState(() {
+                  isSending = false;
+                  dialogError = _mapFirebaseAuthError(e);
+                });
+              } catch (_) {
+                setDialogState(() {
+                  isSending = false;
+                  dialogError = 'No se pudo enviar el correo. Intenta de nuevo.';
+                });
+              }
+            }
+
+            return AlertDialog(
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(16),
+              ),
+              title: const Text('Recuperar contraseña'),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Ingresa tu correo registrado y te enviaremos un enlace para restablecer tu contraseña.',
+                    style: TextStyle(fontSize: 14),
+                  ),
+                  const SizedBox(height: 16),
+                  TextField(
+                    controller: resetEmailCtrl,
+                    enabled: !isSending,
+                    keyboardType: TextInputType.emailAddress,
+                    decoration: InputDecoration(
+                      labelText: 'Correo electrónico',
+                      hintText: 'ejemplo@correo.com',
+                      errorText: dialogError,
+                      errorMaxLines: 2,
+                      prefixIcon: const Icon(Icons.email_outlined),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: isSending
+                      ? null
+                      : () => Navigator.of(dialogContext).pop(),
+                  child: const Text('Cancelar'),
+                ),
+                ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.pinkAccent,
+                    foregroundColor: Colors.white,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                  ),
+                  onPressed: isSending ? null : sendReset,
+                  child: isSending
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(
+                            color: Colors.white,
+                            strokeWidth: 2,
+                          ),
+                        )
+                      : const Text('Enviar enlace'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+
+    resetEmailCtrl.dispose();
+
+    if (!mounted) return;
+
+    if (sentToEmail != null) {
+      if (_emailCtrl.text.trim().isEmpty) {
+        _emailCtrl.text = sentToEmail;
+      }
+      _trigSuccess?.fire();
+      ScaffoldMessenger.of(context)
+        ..clearSnackBars()
+        ..showSnackBar(
+          SnackBar(
+            content: Text(
+              '✅ Correo de recuperación enviado a $sentToEmail. Revisa tu bandeja de entrada o spam.',
+            ),
+            backgroundColor: Colors.green,
+            duration: const Duration(seconds: 5),
+          ),
+        );
     }
   }
 
@@ -95,31 +280,25 @@ class _LoginScreenState extends State<LoginScreen> {
     });
   }
 
-  // 2.2 Listeners
   @override
   void initState() {
     super.initState();
     _emailFocus.addListener(() {
       if (_emailFocus.hasFocus) {
-        if (_isHandsUp != null) {
-          _isHandsUp?.change(false);
-          // 3.4 Mirada neutra
-          _numLook?.value = 50.0;
-        }
+        _isHandsUp?.change(false);
+        _isChecking?.change(true);
+        _numLook?.value = 50.0;
       }
     });
     _passwordFocus.addListener(() {
-      // manos arriba en el password
-      _isHandsUp?.change(_passwordFocus.hasFocus);
+      _isHandsUp?.change(_passwordFocus.hasFocus && _obscure);
     });
   }
 
   @override
   Widget build(BuildContext context) {
-    // Para obtener el tamaño de la pantalla
     final Size size = MediaQuery.of(context).size;
     return Scaffold(
-
       body: SingleChildScrollView(
         child: SafeArea(
           child: Padding(
@@ -132,64 +311,44 @@ class _LoginScreenState extends State<LoginScreen> {
                   child: RiveAnimation.asset(
                     'assets/login-bear.riv',
                     stateMachines: const ['Login Machine'],
-                    // 1.2 vincular animacion
                     onInit: (artboard) {
                       _controller = StateMachineController.fromArtboard(
                         artboard,
                         'Login Machine',
                       );
 
-                      // 1.3 verificar que inicio bien
                       if (_controller == null) return;
-                      // Agrega el controlador al escenario/tablero
                       artboard.addController(_controller!);
-                      // Vinculamos variables
                       _isChecking = _controller!.findSMI('isChecking');
                       _isHandsUp = _controller!.findSMI('isHandsUp');
                       _trigSuccess = _controller!.findSMI('trigSuccess');
                       _trigFail = _controller!.findSMI('trigFail');
-                      // 3.5 Vincular numLook
                       _numLook = _controller!.findSMI('numLook');
                     },
                   ),
                 ),
 
-                // para email
                 const SizedBox(height: 10),
                 TextField(
                   controller: _emailCtrl,
-                  // 2.3 Asignar foco al campo de texto
                   focusNode: _emailFocus,
+                  enabled: !_isLoading,
                   onChanged: (value) {
-                    if (_isHandsUp != null) {
-                      // _isHandsUp!.change(false);
-                    }
                     if (_isChecking == null) return;
                     _isChecking!.change(true);
 
-                    // 3.6 Implementar numLook
-                    // Ajustes de limites del 0 a 100
-                    // 80 es la medida de calibracion
-                    final look = (value.length / 60.0 * 100.0).clamp(0.0, 100.0);
-                    // clamp es el rango (abrazadera)
+                    final look =
+                        (value.length / 60.0 * 100.0).clamp(0.0, 100.0);
                     _numLook?.value = look;
 
-                    //3.7 Debounce: si vuelve a teclear, reinicia el contador
-                    //cancelar cualquier timer existente
                     _typingDebounce?.cancel();
-                    //crear un nuevo timer
-                    _typingDebounce = Timer(const Duration(seconds: 3), (){
-
-                      //si se cierra la pantalla se cierra el contador
+                    _typingDebounce = Timer(const Duration(seconds: 3), () {
                       if (!mounted) return;
-                      //mirada neutra
                       _isChecking?.change(false);
                     });
-
                   },
                   keyboardType: TextInputType.emailAddress,
                   decoration: InputDecoration(
-                    //4.11 mostrar texto de error
                     errorText: emailError,
                     hintText: 'Email',
                     prefixIcon: const Icon(Icons.email),
@@ -199,23 +358,17 @@ class _LoginScreenState extends State<LoginScreen> {
                   ),
                 ),
 
-                // contraseña
                 const SizedBox(height: 10),
                 TextField(
-                  //4.10 enlazar controller
                   controller: _passCtrl,
-                  // 2.3 Asignar foco al campo de texto
                   focusNode: _passwordFocus,
+                  enabled: !_isLoading,
                   onChanged: (value) {
-                    if (_isChecking != null) {
-                      // _isChecking!.change(false);
-                    }
                     if (_isHandsUp == null) return;
-                    _isHandsUp!.change(true);
+                    _isHandsUp!.change(_obscure);
                   },
                   obscureText: _obscure,
                   decoration: InputDecoration(
-                    //4.11 mostrar texto de error
                     errorText: passError,
                     hintText: 'Password',
                     prefixIcon: const Icon(Icons.lock),
@@ -224,10 +377,12 @@ class _LoginScreenState extends State<LoginScreen> {
                         _obscure ? Icons.visibility : Icons.visibility_off,
                       ),
                       onPressed: () {
-                        // refrescar el icono
                         setState(() {
                           _obscure = !_obscure;
                         });
+                        if (_passwordFocus.hasFocus) {
+                          _isHandsUp?.change(_obscure);
+                        }
                       },
                     ),
                     border: OutlineInputBorder(
@@ -235,18 +390,28 @@ class _LoginScreenState extends State<LoginScreen> {
                     ),
                   ),
                 ),
-                const SizedBox(height: 10),
-                //4.12 Texto olvide la contraseña
-                SizedBox(
-                  width: size.width,
-                  child: const Text(
-                    'Forgot password?',
-                    //alinear a la derecha
-                    textAlign: TextAlign.right,
-                    style: TextStyle(decoration: TextDecoration.underline),
+
+                // Enlace Forgot password conectado a sendPasswordResetEmail
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: TextButton(
+                    onPressed: _isLoading ? null : _onForgotPassword,
+                    style: TextButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 4,
+                        vertical: 4,
+                      ),
+                    ),
+                    child: const Text(
+                      'Forgot password?',
+                      style: TextStyle(
+                        color: Colors.black87,
+                        decoration: TextDecoration.underline,
+                      ),
+                    ),
                   ),
                 ),
-                const SizedBox(height: 10),
+
                 GestureDetector(
                   onTap: _rememberMeAnimating ? null : _toggleRememberMe,
                   child: Row(
@@ -264,9 +429,7 @@ class _LoginScreenState extends State<LoginScreen> {
                         height: 28,
                         padding: const EdgeInsets.all(3),
                         decoration: BoxDecoration(
-                          color: _rememberMe
-                              ? Colors.pinkAccent
-                              : Colors.grey,
+                          color: _rememberMe ? Colors.pinkAccent : Colors.grey,
                           borderRadius: BorderRadius.circular(20),
                         ),
                         child: AnimatedAlign(
@@ -290,39 +453,60 @@ class _LoginScreenState extends State<LoginScreen> {
                   ),
                 ),
                 const SizedBox(height: 10),
-                //4.13 boton de login
+
                 MaterialButton(
                   minWidth: size.width,
                   height: 50,
                   color: Colors.pinkAccent,
+                  disabledColor: Colors.pinkAccent.withValues(alpha: 0.6),
                   shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(12)
+                    borderRadius: BorderRadius.circular(12),
                   ),
-
-                  onPressed: _onlogin,
-                  child: Text(
-                    'Login',
-                    style: TextStyle(color: Colors.white)),
+                  onPressed: _isLoading ? null : _onLogin,
+                  child: _isLoading
+                      ? const SizedBox(
+                          width: 24,
+                          height: 24,
+                          child: CircularProgressIndicator(
+                            color: Colors.white,
+                            strokeWidth: 2.5,
+                          ),
+                        )
+                      : const Text(
+                          'Login',
+                          style: TextStyle(color: Colors.white),
+                        ),
                 ),
                 const SizedBox(height: 10),
+
                 SizedBox(
                   width: size.width,
                   child: Row(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      const Text("Dont't have an account?"),
-                      TextButton(onPressed: (){},
-                        child: Text('Sign up',
-                        style: TextStyle(
-                          color: Colors.black,
-                          //subrayado
-                          decoration: TextDecoration.underline,
-                          //negritas
-                          fontWeight: FontWeight.bold
-                        ),))
+                      const Text("Don't have an account?"),
+                      TextButton(
+                        onPressed: _isLoading
+                            ? null
+                            : () {
+                                Navigator.of(context).push(
+                                  MaterialPageRoute(
+                                    builder: (_) => const SignupScreen(),
+                                  ),
+                                );
+                              },
+                        child: const Text(
+                          'Sign up',
+                          style: TextStyle(
+                            color: Colors.black,
+                            decoration: TextDecoration.underline,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ),
                     ],
-                  )
-                )
+                  ),
+                ),
               ],
             ),
           ),
@@ -333,14 +517,11 @@ class _LoginScreenState extends State<LoginScreen> {
 
   @override
   void dispose() {
-    //4.15 Liberar los controladores
     _emailCtrl.dispose();
     _passCtrl.dispose();
-    // 2.4 Liberar espacio en memoria
     _emailFocus.dispose();
     _passwordFocus.dispose();
-    _typingDebounce?.cancel(); //3.9 Eliminar el timer
+    _typingDebounce?.cancel();
     super.dispose();
-
   }
 }
