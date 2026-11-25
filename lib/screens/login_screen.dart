@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+import 'package:login_bear_animation/screens/products_screen.dart';
 import 'package:login_bear_animation/screens/signup_screen.dart';
 import 'package:rive/rive.dart';
 
@@ -98,9 +99,14 @@ class _LoginScreenState extends State<LoginScreen> {
       );
 
       _trigSuccess?.fire();
-      await Future.delayed(const Duration(milliseconds: 1500));
+      await Future.delayed(const Duration(seconds: 2));
 
       LoginScreen.isCelebrating.value = false;
+      if (!mounted) return;
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(builder: (_) => const ProductsScreen()),
+      );
     } on FirebaseAuthException catch (e) {
       LoginScreen.isCelebrating.value = false;
       _trigFail?.fire();
